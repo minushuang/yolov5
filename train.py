@@ -401,7 +401,6 @@ if __name__ == '__main__':
     parser.add_argument('--adam', action='store_true', help='use adam optimizer')
     parser.add_argument('--multi-scale', action='store_true', help='vary img-size +/- 50%')
     parser.add_argument('--single-cls', action='store_true', help='train as single-class dataset')
-    parser.add_argument('--world-size', type=int, default='1', help='# of devices')
     opt = parser.parse_args()
     opt.weights = last if opt.resume and not opt.weights else opt.weights
     opt.cfg = check_file(opt.cfg)  # check file
@@ -418,6 +417,7 @@ if __name__ == '__main__':
         # tb_writer = SummaryWriter(comment=opt.name)
         # print('Start Tensorboard with "tensorboard --logdir=runs", view at http://localhost:6006/')
         # train(hyp)
+        opt.world_size = len(opt.device.split(","))
         run(train, hyp, opt, device)
 
     # Evolve hyperparameters (optional)
