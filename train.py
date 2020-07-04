@@ -418,7 +418,8 @@ if __name__ == '__main__':
         # print('Start Tensorboard with "tensorboard --logdir=runs", view at http://localhost:6006/')
         # train(hyp)
         opt.world_size = len(opt.device.split(","))
-        run(train, hyp, opt, device)
+        if (device != "cpu"): run(train, hyp, opt, device)
+        else: train(0, hyp, opt, device)
 
     # Evolve hyperparameters (optional)
     else:
