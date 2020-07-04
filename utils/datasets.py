@@ -52,7 +52,9 @@ def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=Fa
                                   pad=pad)
 
     batch_size = min(batch_size, len(dataset))
-    nw = min([os.cpu_count(), batch_size if batch_size > 1 else 0, 8])//opt.world_size  # number of workers
+    nw = min([os.cpu_count(), batch_size if batch_size > 1 else 0, 8])
+    if (hasattr(opt, "world_size")):
+        nw//=opt.world_size  # number of workers
 
     if (split):
         datasampler = torch.utils.data.distributed.DistributedSampler(dataset,
