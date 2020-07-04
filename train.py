@@ -122,7 +122,7 @@ def train(rank, hyp, opt, device):
     # Load Model
     if (rank == 0): #Let gpu 0 download
         google_utils.attempt_download(weights)
-    dist.barrier() 
+    dist.barrier() if device.type != 'cpu' and torch.cuda.device_count() > 1 else None 
 
     start_epoch, best_fitness = 0, 0.0
     if weights.endswith('.pt'):  # pytorch format
@@ -218,7 +218,7 @@ def train(rank, hyp, opt, device):
     print('Using %g dataloader workers' % dataloader.num_workers)
     print('Starting training for %g epochs...' % epochs)
     
-    dist.barrier()#Add so all process start at same time. Cleaner output
+    dist.barrier() if device.type != 'cpu' and torch.cuda.device_count() > 1 else None#Add so all process start at same time. Cleaner output
     # torch.autograd.set_detect_anomaly(True)
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         model.train()
@@ -319,7 +319,7 @@ def train(rank, hyp, opt, device):
         # Write
         with open(results_file, 'a') as f:
             f.write(s + '%10.4g' * 7 % results + '\n')  # P, R, mAP, F1, test_losses=(GIoU, obj, cls)
-        dist.barrier()
+        dist.barrier() if device.type != 'cpu' and torch.cuda.device_count() > 1 else None
         if len(opt.name) and opt.bucket and rank == 0:
             os.system('gsutil cp results.txt gs://%s/results/results%s.txt' % (opt.bucket, opt.name))
 
@@ -351,7 +351,7 @@ def train(rank, hyp, opt, device):
             if (best_fitness == fi) and not final_epoch:
                 torch.save(ckpt, best)
             del ckpt
-        dist.barrier()
+        dist.barrier() if device.type != 'cpu' and torch.cuda.device_count() > 1 else None
         # end epoch ----------------------------------------------------------------------------------------------------
     # end training
 
@@ -371,8 +371,8 @@ def train(rank, hyp, opt, device):
             plot_results()  # save as results.png
         print('%g epochs completed in %.3f hours.\n' % (epoch - start_epoch + 1, (time.time() - t0) / 3600))
     
-    dist.barrier()
-    
+    dist.barrier() if device.type != 'cpu' and torch.cuda.device_count() > 1 else None
+
     dist.destroy_process_group() if device.type != 'cpu' and torch.cuda.device_count() > 1 else None
     torch.cuda.empty_cache()
     return results
