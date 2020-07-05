@@ -22,8 +22,6 @@ except:
     print('Apex recommended for faster mixed precision training: https://github.com/NVIDIA/apex')
     mixed_precision = False  # not installed
 
-print("<<<<<<<<<<<<<<<<<<<<<<<<<<<OUTPUT OUTSIDE>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
-
 def setOpt(opt):
     opt.wdir = 'weights' + os.sep  # weights dir
     os.makedirs(opt.wdir, exist_ok=True)
