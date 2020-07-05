@@ -183,8 +183,8 @@ def train(rank, opt):
     mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
     assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Correct your labels or your model.' % (mlc, nc, opt.cfg)
 
-    # Testloader
-    testloader = create_dataloader(test_path, imgsz_test, batch_size, gs, opt,
+    # Testloader for one device only
+    if (rank == 0): testloader = create_dataloader(test_path, imgsz_test, batch_size, gs, opt,
                                    hyp=hyp, augment=False, cache=opt.cache_images, rect=True, rank=rank)[0]
 
     # Initialize distributed training
@@ -310,54 +310,54 @@ def train(rank, opt):
         # Scheduler
         scheduler.step()
 
-        # mAP
         ema.update_attr(model)
-        final_epoch = epoch + 1 == epochs
-        if (not opt.notest or final_epoch):  # Calculate mAP
-            results, maps, times = test.test(opt.data,
-                                             batch_size=batch_size,
-                                             imgsz=imgsz_test,
-                                             save_json=final_epoch and opt.data.endswith(os.sep + 'coco.yaml'),
-                                             model=ema.ema,
-                                             single_cls=opt.single_cls,
-                                             dataloader=testloader,
-                                             device=torch.device(rank))
+        if (rank == 0):
+            # mAP
+            final_epoch = epoch + 1 == epochs
+            if (not opt.notest or final_epoch):  # Calculate mAP
+                results, maps, times = test.test(opt.data,
+                                                batch_size=batch_size,
+                                                imgsz=imgsz_test,
+                                                save_json=final_epoch and opt.data.endswith(os.sep + 'coco.yaml'),
+                                                model=ema.ema,
+                                                single_cls=opt.single_cls,
+                                                dataloader=testloader,
+                                                device=torch.device(rank))
 
-        # Write
-        with open(results_file, 'a') as f:
-            f.write(s + '%10.4g' * 7 % results + '\n')  # P, R, mAP, F1, test_losses=(GIoU, obj, cls)
-        dist.barrier() if device.type != 'cpu' and torch.cuda.device_count() > 1 else None
-        if len(opt.name) and opt.bucket and rank == 0:
-            os.system('gsutil cp results.txt gs://%s/results/results%s.txt' % (opt.bucket, opt.name))
+            # Write
+            with open(results_file, 'a') as f:
+                f.write(s + '%10.4g' * 7 % results + '\n')  # P, R, mAP, F1, test_losses=(GIoU, obj, cls)
+            if len(opt.name) and opt.bucket:
+                os.system('gsutil cp results.txt gs://%s/results/results%s.txt' % (opt.bucket, opt.name))
 
-        # Tensorboard
-        # if tb_writer:
-        #     tags = ['train/giou_loss', 'train/obj_loss', 'train/cls_loss',
-        #             'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/F1',
-        #             'val/giou_loss', 'val/obj_loss', 'val/cls_loss']
-        #     for x, tag in zip(list(mloss[:-1]) + list(results), tags):
-        #         tb_writer.add_scalar(tag, x, epoch)
+            # Tensorboard
+            # if tb_writer:
+            #     tags = ['train/giou_loss', 'train/obj_loss', 'train/cls_loss',
+            #             'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/F1',
+            #             'val/giou_loss', 'val/obj_loss', 'val/cls_loss']
+            #     for x, tag in zip(list(mloss[:-1]) + list(results), tags):
+            #         tb_writer.add_scalar(tag, x, epoch)
 
-        # Update best mAP
-        fi = fitness(np.array(results).reshape(1, -1))  # fitness_i = weighted combination of [P, R, mAP, F1]
-        if fi > best_fitness:
-            best_fitness = fi
+            # Update best mAP
+            fi = fitness(np.array(results).reshape(1, -1))  # fitness_i = weighted combination of [P, R, mAP, F1]
+            if fi > best_fitness:
+                best_fitness = fi
 
-        # Save model
-        save = (not opt.nosave) or (final_epoch and not opt.evolve)
-        if save and rank == 0:
-            with open(results_file, 'r') as f:  # create checkpoint
-                ckpt = {'epoch': epoch,
-                        'best_fitness': best_fitness,
-                        'training_results': f.read(),
-                        'model': ema.ema,
-                        'optimizer': None if final_epoch else optimizer.state_dict()}
+            # Save model
+            save = (not opt.nosave) or (final_epoch and not opt.evolve)
+            if save and rank == 0:
+                with open(results_file, 'r') as f:  # create checkpoint
+                    ckpt = {'epoch': epoch,
+                            'best_fitness': best_fitness,
+                            'training_results': f.read(),
+                            'model': ema.ema,
+                            'optimizer': None if final_epoch else optimizer.state_dict()}
 
-            # Save last, best and delete
-            torch.save(ckpt, last)
-            if (best_fitness == fi) and not final_epoch:
-                torch.save(ckpt, best)
-            del ckpt
+                # Save last, best and delete
+                torch.save(ckpt, last)
+                if (best_fitness == fi) and not final_epoch:
+                    torch.save(ckpt, best)
+                del ckpt
         dist.barrier() if device.type != 'cpu' and torch.cuda.device_count() > 1 else None
         # end epoch ----------------------------------------------------------------------------------------------------
     # end training
