@@ -91,8 +91,7 @@ def train(rank, hyp, opt, device):
             os.remove(f)
 
     # Create model
-    model = Model(opt.cfg).to(rank)
-    assert model.md['nc'] == nc, '%s nc=%g classes but %s nc=%g classes' % (opt.data, nc, opt.cfg, model.md['nc'])
+    model = Model(opt.cfg, nc=data_dict['nc']).to(rank)
 
     # Image sizes
     gs = int(max(model.stride))  # grid size (max stride)
