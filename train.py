@@ -298,7 +298,7 @@ def train(rank, opt):
             pbar.set_description(s)
 
             # Plot
-            if ni < 3:
+            if ni < 3 and rank == 0:
                 f = 'train_batch%g.jpg' % ni  # filename
                 result = plot_images(images=imgs, targets=targets, paths=paths, fname=f)
                 # if tb_writer and result is not None:
