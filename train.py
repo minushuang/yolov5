@@ -68,15 +68,17 @@ def setup(opt, rank):
                             rank=rank)
     torch.cuda.set_device(rank)
 
-def train(rank, hyp, opt, device):
+def train(rank, opt):
     if opt.world_size > 1: 
         setup(opt, rank)
-        hyp["lr0"] /= opt.world_size #this was said to help
+        opt.hyp["lr0"] /= opt.world_size #this was said to help
         opt.batch_size /= opt.world_size
 
     epochs = opt.epochs  # 300
     batch_size = opt.batch_size  # 64
     weights = opt.weights  # initial training weights
+    hyp = opt.hyp
+    device = opt.device
 
     # Configure
     init_seeds(1)
@@ -377,9 +379,9 @@ def train(rank, hyp, opt, device):
     torch.cuda.empty_cache()
     return results
 
-def run(fn, hyp, opt, device):
+def run(fn, opt):
     mp.spawn(fn,
-             args=(hyp,opt,device,),
+             args=(opt,),
              nprocs=opt.world_size,
              join=True)
 
@@ -422,8 +424,10 @@ if __name__ == '__main__':
         # print('Start Tensorboard with "tensorboard --logdir=runs", view at http://localhost:6006/')
         # train(hyp)
         opt.world_size = len(opt.device.split(","))
-        if (device.type != "cpu"): run(train, hyp, opt, device)
-        else: train(0, hyp, opt, device)
+        opt.hyp = hyp
+        opt.device = device
+        if (device.type != "cpu"): run(train, opt)
+        else: train(0, opt)
 
     # Evolve hyperparameters (optional)
     else:
