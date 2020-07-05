@@ -72,7 +72,7 @@ def train(rank, opt):
     if opt.world_size > 1: 
         setup(opt, rank)
         opt.hyp["lr0"] /= opt.world_size #this was said to help
-        opt.batch_size //= opt.world_size
+        #opt.batch_size //= opt.world_size #batch_size is now considered per gpu
 
     epochs = opt.epochs  # 300
     batch_size = opt.batch_size  # 64
