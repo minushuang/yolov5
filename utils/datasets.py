@@ -52,28 +52,22 @@ def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=Fa
                                   pad=pad)
 
     batch_size = min(batch_size, len(dataset))
-    if (hasattr(opt, "world_size")):
-        #nw=int((nw+opt.world_size-1)/opt.world_size)  # https://github.com/pytorch/examples/blob/19ae7a30593ab31704d54493f49acc32f316da79/imagenet/main.py#L152
+    if (hasattr(opt, "distributed") and opt.distributed):
         nw = min([os.cpu_count()//opt.world_size, batch_size if batch_size > 1 else 0, 8])
+        #nw=int((nw+opt.world_size-1)/opt.world_size)  # https://github.com/pytorch/examples/blob/19ae7a30593ab31704d54493f49acc32f316da79/imagenet/main.py#L152
     else:
         nw = min([os.cpu_count(), batch_size if batch_size > 1 else 0, 8])
 
-    if (split):
-        datasampler = torch.utils.data.distributed.DistributedSampler(dataset,
-                                                                    num_replicas=opt.world_size,
-                                                                    rank=rank)
-        dataloader = torch.utils.data.DataLoader(dataset,
-                                             batch_size=batch_size,
-                                             num_workers=nw,
-                                             pin_memory=True,
-                                             collate_fn=LoadImagesAndLabels.collate_fn,
-                                             sampler=datasampler)
-    else:
-        dataloader = torch.utils.data.DataLoader(dataset,
-                                             batch_size=batch_size,
-                                             num_workers=nw,
-                                             pin_memory=True,
-                                             collate_fn=LoadImagesAndLabels.collate_fn)
+   
+    datasampler = torch.utils.data.distributed.DistributedSampler(dataset,
+                                                                num_replicas=opt.world_size,
+                                                                rank=rank) if split else None
+    dataloader = torch.utils.data.DataLoader(dataset,
+                                            batch_size=batch_size,
+                                            num_workers=nw,
+                                            pin_memory=True,
+                                            collate_fn=LoadImagesAndLabels.collate_fn,
+                                            sampler=datasampler)
     return dataloader, dataset
 
 

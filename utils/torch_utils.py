@@ -48,6 +48,15 @@ def select_device(device='', apex=False, batch_size=None):
     print('')  # skip a line
     return torch.device('cuda:0' if cuda else 'cpu')
 
+def torch_distributed_zero_only(rank : int, distributed : bool): #MagicFrogSJTU
+    """
+    Blocks processes of rank != 0 until the rank=0 process is done. 
+    Does nothing for non-distributed.
+    """
+    if (rank != 0):
+        torch.distributed.barrier()
+    yield
+    if (distributed): torch.distributed.barrier()
 
 def time_synchronized():
     torch.cuda.synchronize() if torch.cuda.is_available() else None

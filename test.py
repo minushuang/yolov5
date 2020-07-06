@@ -23,7 +23,7 @@ def test(data,
     # Initialize/load model and set device
     if model is None:
         training = False
-        if (device == None): device = torch_utils.select_device(opt.device, batch_size=batch_size)
+        if (device is None): device = torch_utils.select_device(opt.device, batch_size=batch_size)
 
         # Remove previous
         for f in glob.glob('test_batch*.jpg'):

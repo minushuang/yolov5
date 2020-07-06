@@ -14,11 +14,15 @@ from models.yolo import Model
 from utils import google_utils
 from utils.datasets import *
 from utils.utils import *
+from utils.torch_utils import torch_distributed_zero_only
 
 mixed_precision = True
 try:  # Mixed precision training https://github.com/NVIDIA/apex
     from apex import amp
+    from apex.parallel import DistributedDataParallel as DDP
 except:
+    from torch.nn.parallel import DistributedDataParallel as DDP
+
     print('Apex recommended for faster mixed precision training: https://github.com/NVIDIA/apex')
     mixed_precision = False  # not installed
 
@@ -61,7 +65,7 @@ def setOpt(opt):
     if opt.hyp['fl_gamma']:
         print('Using FocalLoss(gamma=%g)' % opt.hyp['fl_gamma'])
 
-def setup(opt, rank):
+def setupDDP(opt, rank):
     dist.init_process_group(backend='nccl',  # distributed backend
                             init_method='tcp://127.0.0.1:9999',  # init method
                             world_size=opt.world_size,  # number of gpus
@@ -69,16 +73,19 @@ def setup(opt, rank):
     torch.cuda.set_device(rank)
 
 def train(rank, opt):
-    if opt.world_size > 1: 
-        setup(opt, rank)
+    if opt.distributed: 
+        setupDDP(opt, rank)
         opt.hyp["lr0"] /= opt.world_size #this was said to help
         #opt.batch_size //= opt.world_size #batch_size is now considered per gpu
+        device = torch.device(rank)
+    else:
+        device = opt.device
 
-    epochs = opt.epochs  # 300
-    batch_size = opt.batch_size  # 64
-    weights = opt.weights  # initial training weights
+    epochs = opt.epochs
+    batch_size = opt.batch_size
+    weights = opt.weights
     hyp = opt.hyp
-    device = opt.device
+    tb_writer = opt.tb_writer if (rank == 0 and hasattr(opt, "tb_writer")) else None
 
     wdir = opt.wdir
     last = opt.last
@@ -99,7 +106,7 @@ def train(rank, opt):
             os.remove(f)
 
     # Create model
-    model = Model(opt.cfg, nc=data_dict['nc']).to(rank)
+    model = Model(opt.cfg, nc=data_dict['nc']).to(device)
 
     # Image sizes
     gs = int(max(model.stride))  # grid size (max stride)
@@ -127,14 +134,12 @@ def train(rank, opt):
     del pg0, pg1, pg2
 
     # Load Model
-    if (rank == 0): #Let gpu 0 download
+    with torch_distributed_zero_only(rank, opt.distributed):
         google_utils.attempt_download(weights)
-    dist.barrier() if device.type != 'cpu' and torch.cuda.device_count() > 1 else None 
 
     start_epoch, best_fitness = 0, 0.0
     if weights.endswith('.pt'):  # pytorch format
-        map_location = torch.device(rank) if (opt.world_size > 1) else device
-        ckpt = torch.load(weights, map_location=map_location)  # load checkpoint
+        ckpt = torch.load(weights, map_location=device)  # load checkpoint
 
         # load model
         try:
@@ -184,12 +189,13 @@ def train(rank, opt):
     assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Correct your labels or your model.' % (mlc, nc, opt.cfg)
 
     # Testloader for one device only
-    if (rank == 0): testloader = create_dataloader(test_path, imgsz_test, batch_size, gs, opt,
+    if (rank == 0):
+        testloader = create_dataloader(test_path, imgsz_test, batch_size, gs, opt,
                                    hyp=hyp, augment=False, cache=opt.cache_images, rect=True, rank=rank)[0]
 
     # Initialize distributed training
-    if device.type != 'cpu' and torch.cuda.device_count() > 1 and torch.distributed.is_available():
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[rank], output_device=rank)
+    if opt.distributed:
+        model = DDP(model, device_ids=[rank], output_device=rank)
 
     # Model parameters
     hyp['cls'] *= nc / 80.  # scale coco-tuned hyp['cls'] to current dataset
@@ -197,23 +203,23 @@ def train(rank, opt):
     model.hyp = hyp  # attach hyperparameters to model
     model.gr = 1.0  # giou loss ratio (obj_loss = 1.0 or giou)
     model.names = data_dict['names']
-    model.class_weights = labels_to_class_weights(dataset.labels, nc).to(rank)  # attach class weights
+    model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device)  # attach class weights
 
     # Class frequency
     labels = np.concatenate(dataset.labels, 0)
     c = torch.tensor(labels[:, 0])  # classes
     # cf = torch.bincount(c.long(), minlength=nc) + 1.
-    # model._initialize_biases(cf.to(rank))
-    # if tb_writer:
-    #     plot_labels(labels)
-    #     tb_writer.add_histogram('classes', c, 0)
+    # model._initialize_biases(cf.to(device))
+    if tb_writer:
+        plot_labels(labels)
+        tb_writer.add_histogram('classes', c, 0)
 
     # Check anchors
     if not opt.noautoanchor:
         check_anchors(dataset, model=model, thr=hyp['anchor_t'], imgsz=imgsz)
 
     # Exponential moving average
-    ema = torch_utils.ModelEMA(model,device=rank)
+    ema = torch_utils.ModelEMA(model,device=device) if rank == 0 else None
 
     # Start training
     t0 = time.time()
@@ -221,16 +227,17 @@ def train(rank, opt):
     n_burn = max(3 * nb, 1e3)  # burn-in iterations, max(3 epochs, 1k iterations)
     maps = np.zeros(nc)  # mAP per class
     results = (0, 0, 0, 0, 0, 0, 0)  # 'P', 'R', 'mAP', 'F1', 'val GIoU', 'val Objectness', 'val Classification'
-    print('Image sizes %g train, %g test' % (imgsz, imgsz_test))
-    print('Using %g dataloader workers' % dataloader.num_workers)
-    print('Starting training for %g epochs...' % epochs)
     
-    dist.barrier() if device.type != 'cpu' and torch.cuda.device_count() > 1 else None#Add so all process start at same time. Cleaner output
+    if (rank == 0):
+        print('Image sizes %g train, %g test' % (imgsz, imgsz_test))
+        print('Using %g dataloader workers' % dataloader.num_workers)
+        print('Starting training for %g epochs...' % epochs)
+
     # torch.autograd.set_detect_anomaly(True)
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         model.train()
 
-        dataloader.sampler.set_epoch(epoch)
+        if (opt.distributed): dataloader.sampler.set_epoch(epoch)
 
         # Update image weights (optional)
         if dataset.image_weights:
@@ -242,13 +249,18 @@ def train(rank, opt):
         # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
-        mloss = torch.zeros(4, device=rank)  # mean losses
-        if (rank == 0): print(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'GIoU', 'obj', 'cls', 'total', 'targets', 'img_size'))
+        mloss = torch.zeros(4, device=device)  # mean losses
+        if (rank == 0):
+            print(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'GIoU', 'obj', 'cls', 'total', 'targets', 'img_size'))
+
         pbar = tqdm(enumerate(dataloader), total=nb)  # progress bar
         for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
+            imgs = imgs.to(device, non_blocking=opt.distributed)
+            targets = targets.to(device, non_blocking=opt.distributed)
+            
             ni = i + nb * epoch  # number integrated batches (since train start)
-            imgs = imgs.to(rank, non_blocking=True).float() / 255.0  # uint8 to float32, 0 - 255 to 0.0 - 1.0
-
+            imgs = imgs.float() / 255.0  # uint8 to float32, 0 - 255 to 0.0 - 1.0
+            
             # Burn-in
             if ni <= n_burn:
                 xi = [0, n_burn]  # x interp
@@ -272,7 +284,7 @@ def train(rank, opt):
             pred = model(imgs)
 
             # Loss
-            loss, loss_items = compute_loss(pred, targets.to(rank, non_blocking=True), model)
+            loss, loss_items = compute_loss(pred, targets, model)
             if not torch.isfinite(loss):
                 print('WARNING: non-finite loss, ending training ', loss_items)
                 return results
@@ -288,7 +300,7 @@ def train(rank, opt):
             if ni % accumulate == 0:
                 optimizer.step()
                 optimizer.zero_grad()
-                ema.update(model)
+                if (ema): ema.update(model)
 
             # Print
             mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
@@ -298,21 +310,22 @@ def train(rank, opt):
             pbar.set_description(s)
 
             # Plot
-            if ni < 3 and rank == 0:
-                f = 'train_batch%g.jpg' % ni  # filename
-                result = plot_images(images=imgs, targets=targets, paths=paths, fname=f)
-                # if tb_writer and result is not None:
-                #     tb_writer.add_image(f, result, dataformats='HWC', global_step=epoch)
-                    # tb_writer.add_graph(model, imgs)  # add model to tensorboard
+            if ni < 3:
+                if (rank == 0):
+                    f = 'train_batch%g.jpg' % ni  # filename
+                    result = plot_images(images=imgs, targets=targets, paths=paths, fname=f)
+                    if tb_writer and result is not None:
+                        tb_writer.add_image(f, result, dataformats='HWC', global_step=epoch)
+                        tb_writer.add_graph(model, imgs)  # add model to tensorboard
 
             # end batch ------------------------------------------------------------------------------------------------
 
         # Scheduler
         scheduler.step()
 
-        ema.update_attr(model)
-        if (rank == 0):
+        with torch_distributed_zero_only(rank, opt.distributed):
             # mAP
+            ema.update_attr(model)
             final_epoch = epoch + 1 == epochs
             if (not opt.notest or final_epoch):  # Calculate mAP
                 results, maps, times = test.test(opt.data,
@@ -322,7 +335,7 @@ def train(rank, opt):
                                                 model=ema.ema,
                                                 single_cls=opt.single_cls,
                                                 dataloader=testloader,
-                                                device=torch.device(rank))
+                                                device=device)
 
             # Write
             with open(results_file, 'a') as f:
@@ -331,12 +344,12 @@ def train(rank, opt):
                 os.system('gsutil cp results.txt gs://%s/results/results%s.txt' % (opt.bucket, opt.name))
 
             # Tensorboard
-            # if tb_writer:
-            #     tags = ['train/giou_loss', 'train/obj_loss', 'train/cls_loss',
-            #             'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/F1',
-            #             'val/giou_loss', 'val/obj_loss', 'val/cls_loss']
-            #     for x, tag in zip(list(mloss[:-1]) + list(results), tags):
-            #         tb_writer.add_scalar(tag, x, epoch)
+            if tb_writer:
+                tags = ['train/giou_loss', 'train/obj_loss', 'train/cls_loss',
+                        'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/F1',
+                        'val/giou_loss', 'val/obj_loss', 'val/cls_loss']
+                for x, tag in zip(list(mloss[:-1]) + list(results), tags):
+                    tb_writer.add_scalar(tag, x, epoch)
 
             # Update best mAP
             fi = fitness(np.array(results).reshape(1, -1))  # fitness_i = weighted combination of [P, R, mAP, F1]
@@ -358,11 +371,10 @@ def train(rank, opt):
                 if (best_fitness == fi) and not final_epoch:
                     torch.save(ckpt, best)
                 del ckpt
-        dist.barrier() if device.type != 'cpu' and torch.cuda.device_count() > 1 else None
         # end epoch ----------------------------------------------------------------------------------------------------
     # end training
 
-    if (rank == 0):
+    with torch_distributed_zero_only(rank, opt.distributed):
         # Strip optimizers
         n = ('_' if len(opt.name) and not opt.name.isnumeric() else '') + opt.name
         fresults, flast, fbest = 'results%s.txt' % n, wdir + 'last%s.pt' % n, wdir + 'best%s.pt' % n
@@ -378,8 +390,6 @@ def train(rank, opt):
             plot_results()  # save as results.png
         print('%g epochs completed in %.3f hours.\n' % (epoch - start_epoch + 1, (time.time() - t0) / 3600))
     
-    dist.barrier() if device.type != 'cpu' and torch.cuda.device_count() > 1 else None
-
     dist.destroy_process_group() if device.type != 'cpu' and torch.cuda.device_count() > 1 else None
     torch.cuda.empty_cache()
     return results
@@ -417,25 +427,30 @@ if __name__ == '__main__':
     opt.weights = opt.last if opt.resume and not opt.weights else opt.weights
     opt.cfg = check_file(opt.cfg)  # check file
     opt.data = check_file(opt.data)  # check file
-    print(opt)
     opt.img_size.extend([opt.img_size[-1]] * (2 - len(opt.img_size)))  # extend to 2 sizes (train, test)
     
     device = torch_utils.select_device(opt.device, apex=mixed_precision, batch_size=opt.batch_size)
     if device.type == 'cpu':
         mixed_precision = False
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        opt.distributed = True
+        opt.world_size = torch.cuda.device_count()
+    else:
+        opt.device = device
+        opt.distributed = False
+    print(opt)
 
     # Train
     if not opt.evolve:
-        # tb_writer = SummaryWriter(comment=opt.name)
-        # print('Start Tensorboard with "tensorboard --logdir=runs", view at http://localhost:6006/')
-        # train(hyp)
-        opt.world_size = len(opt.device.split(","))
-        opt.device = device
-        if (device.type != "cpu"): run(train, opt)
-        else: train(0, opt)
-
+        opt.tb_writer = SummaryWriter(comment=opt.name)
+        print('Start Tensorboard with "tensorboard --logdir=runs", view at http://localhost:6006/')
+        if (opt.distributed): 
+            run(train, opt)
+        else: 
+            train(0, opt)
     # Evolve hyperparameters (optional)
     else:
+        assert not opt.distributed, "DDP mode unavailable for evolve"
         # tb_writer = None
         opt.notest, opt.nosave = True, True  # only test/save final epoch
         if opt.bucket:
@@ -475,7 +490,8 @@ if __name__ == '__main__':
                 hyp[k] = np.clip(hyp[k], v[0], v[1])
 
             # Train mutation
-            results = train(hyp.copy())
+            opt.hyp = hyp.copy()
+            results = train(0, opt)
 
             # Write mutation results
             print_mutation(hyp, results, opt.bucket)
