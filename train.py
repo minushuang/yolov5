@@ -302,7 +302,8 @@ def train(rank, opt):
             if ni % accumulate == 0:
                 optimizer.step()
                 optimizer.zero_grad()
-                if (ema): ema.update(model)
+                with torch_distributed_zero_only(rank, opt.distributed):
+                    ema.update(model)
 
             # Print
             mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
