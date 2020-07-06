@@ -8,7 +8,7 @@ import torch.backends.cudnn as cudnn
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
-
+from contextlib import contextmanager
 
 def init_seeds(seed=0):
     torch.manual_seed(seed)
@@ -48,6 +48,7 @@ def select_device(device='', apex=False, batch_size=None):
     print('')  # skip a line
     return torch.device('cuda:0' if cuda else 'cpu')
 
+@contextmanager
 def torch_distributed_zero_only(rank : int, distributed : bool): #MagicFrogSJTU
     """
     Blocks processes of rank != 0 until the rank=0 process is done. 
