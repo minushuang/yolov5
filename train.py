@@ -436,8 +436,9 @@ if __name__ == '__main__':
         opt.distributed = True
         opt.world_size = torch.cuda.device_count()
     else:
-        opt.device = device
         opt.distributed = False
+        opt.device = device
+        opt.world_size = 1
     print(opt)
 
     # Train
