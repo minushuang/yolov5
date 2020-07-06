@@ -306,6 +306,7 @@ def train(rank, opt):
                 optimizer.zero_grad()
                 if (rank == 0):
                     ema.update(model)
+                dist.barrier() if opt.distributed else None
 
             # Print
             mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
