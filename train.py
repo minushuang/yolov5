@@ -85,8 +85,12 @@ def train(rank, opt):
     batch_size = opt.batch_size
     weights = opt.weights
     hyp = opt.hyp
-    tb_writer = opt.tb_writer if (rank == 0 and hasattr(opt, "tb_writer")) else None
 
+    tb_writer = None
+    if (rank == 0):
+        tb_writer = SummaryWriter(comment=opt.name)
+        print('Start Tensorboard with "tensorboard --logdir=runs", view at http://localhost:6006/')
+        
     wdir = opt.wdir
     last = opt.last
     best = opt.best
@@ -443,8 +447,6 @@ if __name__ == '__main__':
 
     # Train
     if not opt.evolve:
-        opt.tb_writer = SummaryWriter(comment=opt.name)
-        print('Start Tensorboard with "tensorboard --logdir=runs", view at http://localhost:6006/')
         if (opt.distributed): 
             run(train, opt)
         else: 
