@@ -345,7 +345,7 @@ def train(rank, opt):
 
             # Save model
             save = (not opt.nosave) or (final_epoch and not opt.evolve)
-            if save and rank == 0:
+            if save:
                 with open(results_file, 'r') as f:  # create checkpoint
                     ckpt = {'epoch': epoch,
                             'best_fitness': best_fitness,
