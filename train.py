@@ -15,7 +15,7 @@ from models.yolo import Model
 from utils import google_utils
 from utils.datasets import *
 from utils.utils import *
-from utils.torch_utils import torch_distributed_zero_only
+# from utils.torch_utils import torch_distributed_zero_first
 
 mixed_precision = True
 try:  # Mixed precision training https://github.com/NVIDIA/apex
@@ -136,8 +136,9 @@ def train(rank, opt):
     del pg0, pg1, pg2
 
     # Load Model
-    with torch_distributed_zero_only(rank, opt.distributed):
+    if (rank == 0):
         google_utils.attempt_download(weights)
+    dist.barrier() if opt.distributed else None
 
     start_epoch, best_fitness = 0, 0.0
     if weights.endswith('.pt'):  # pytorch format
@@ -230,10 +231,11 @@ def train(rank, opt):
     maps = np.zeros(nc)  # mAP per class
     results = (0, 0, 0, 0, 0, 0, 0)  # 'P', 'R', 'mAP', 'F1', 'val GIoU', 'val Objectness', 'val Classification'
     
-    with torch_distributed_zero_only(rank, opt.distributed):
+    if (rank == 0):
         print('Image sizes %g train, %g test' % (imgsz, imgsz_test))
         print('Using %g dataloader workers' % dataloader.num_workers)
         print('Starting training for %g epochs...' % epochs)
+    dist.barrier() if opt.distributed else None
 
     # torch.autograd.set_detect_anomaly(True)
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
@@ -302,7 +304,7 @@ def train(rank, opt):
             if ni % accumulate == 0:
                 optimizer.step()
                 optimizer.zero_grad()
-                with torch_distributed_zero_only(rank, opt.distributed):
+                if (rank == 0):
                     ema.update(model)
 
             # Print
@@ -320,13 +322,13 @@ def train(rank, opt):
                     if tb_writer and result is not None:
                         tb_writer.add_image(f, result, dataformats='HWC', global_step=epoch)
                         #tb_writer.add_graph(model, imgs)  # add model to tensorboard
-
             # end batch ------------------------------------------------------------------------------------------------
-
+        
+        dist.barrier() if opt.distributed else None
         # Scheduler
         scheduler.step()
 
-        with torch_distributed_zero_only(rank, opt.distributed):
+        if (rank == 0):
             # mAP
             ema.update_attr(model)
             final_epoch = epoch + 1 == epochs
@@ -374,10 +376,11 @@ def train(rank, opt):
                 if (best_fitness == fi) and not final_epoch:
                     torch.save(ckpt, best)
                 del ckpt
+        dist.barrier() if opt.distributed else None
         # end epoch ----------------------------------------------------------------------------------------------------
     # end training
 
-    with torch_distributed_zero_only(rank, opt.distributed):
+    if (rank == 0):
         # Strip optimizers
         n = ('_' if len(opt.name) and not opt.name.isnumeric() else '') + opt.name
         fresults, flast, fbest = 'results%s.txt' % n, wdir + 'last%s.pt' % n, wdir + 'best%s.pt' % n
@@ -392,8 +395,9 @@ def train(rank, opt):
         if not opt.evolve:
             plot_results()  # save as results.png
         print('%g epochs completed in %.3f hours.\n' % (epoch - start_epoch + 1, (time.time() - t0) / 3600))
-    
-    dist.destroy_process_group() if device.type != 'cpu' and torch.cuda.device_count() > 1 else None
+    dist.barrier() if opt.distributed else None
+
+    dist.destroy_process_group() if opt.distributed else None
     torch.cuda.empty_cache()
     return results
 
