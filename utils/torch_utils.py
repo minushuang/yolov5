@@ -49,7 +49,7 @@ def select_device(device='', apex=False, batch_size=None):
     return torch.device('cuda:0' if cuda else 'cpu')
 
 @contextmanager
-def torch_distributed_zero_only(rank : int, distributed : bool): #MagicFrogSJTU
+def torch_distributed_zero_first(rank : int, distributed : bool): #MagicFrogSJTU
     """
     Blocks processes of rank != 0 until the rank=0 process is done. 
     Does nothing for non-distributed.
