@@ -8,6 +8,7 @@ import torch.utils.data
 from torch.utils.tensorboard import SummaryWriter
 
 import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 import test  # import test.py to get mAP after each epoch
 from models.yolo import Model
@@ -19,10 +20,7 @@ from utils.torch_utils import torch_distributed_zero_only
 mixed_precision = True
 try:  # Mixed precision training https://github.com/NVIDIA/apex
     from apex import amp
-    from apex.parallel import DistributedDataParallel as DDP
 except:
-    from torch.nn.parallel import DistributedDataParallel as DDP
-
     print('Apex recommended for faster mixed precision training: https://github.com/NVIDIA/apex')
     mixed_precision = False  # not installed
 
