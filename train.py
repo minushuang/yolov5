@@ -306,7 +306,6 @@ def train(rank, opt):
                 optimizer.zero_grad()
                 if (rank == 0):
                     ema.update(model)
-                dist.barrier() if opt.distributed else None
 
             # Print
             mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
@@ -325,7 +324,6 @@ def train(rank, opt):
                         #tb_writer.add_graph(model, imgs)  # add model to tensorboard
             # end batch ------------------------------------------------------------------------------------------------
         
-        dist.barrier() if opt.distributed else None
         # Scheduler
         scheduler.step()
 
@@ -377,7 +375,6 @@ def train(rank, opt):
                 if (best_fitness == fi) and not final_epoch:
                     torch.save(ckpt, best)
                 del ckpt
-        dist.barrier() if opt.distributed else None
         # end epoch ----------------------------------------------------------------------------------------------------
     # end training
 
