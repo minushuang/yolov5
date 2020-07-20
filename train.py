@@ -116,7 +116,7 @@ def train(local_rank, hyp, opt, device):
 
     # Load Model
     # Avoid multiple downloads.
-    with torch_distributed_zero_first(local_rank):
+    with torch_distributed_zero_first(local_rank, (opt.parallel and not opt.distributed)):
         google_utils.attempt_download(weights)
     start_epoch, best_fitness = 0, 0.0
     if weights.endswith('.pt'):  # pytorch format
