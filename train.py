@@ -505,7 +505,7 @@ if __name__ == '__main__':
         if (opt.distributed):
             run(train, hyp, opt, None)
         else:
-            train(-1, hyp, opt, device) #CPU/Single GPU
+            train(0, hyp, opt, device) #CPU/Single GPU
 
     # Evolve hyperparameters (optional)
     else:
