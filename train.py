@@ -27,6 +27,11 @@ except:
 
 def train(local_rank, hyp, opt, device):
     print(f'Hyperparameters {hyp}')
+    if local_rank in [-1, 0]:
+        print('Start Tensorboard with "tensorboard --logdir=runs", view at http://localhost:6006/')
+        tb_writer = SummaryWriter(log_dir=increment_dir('runs/exp', opt.name))
+    else:
+        tb_writer = None
     log_dir = tb_writer.log_dir if tb_writer else 'runs/evolution'  # run directory
     wdir = str(Path(log_dir) / 'weights') + os.sep  # weights directory
 
@@ -47,11 +52,7 @@ def train(local_rank, hyp, opt, device):
     weights = opt.weights  # initial training weights
     mixed_precision = opt.mixed_precision
     # local_rank = opt.local_rank
-    if local_rank in [-1, 0]:
-        print('Start Tensorboard with "tensorboard --logdir=runs", view at http://localhost:6006/')
-        tb_writer = SummaryWriter(log_dir=increment_dir('runs/exp', opt.name))
-    else:
-        tb_writer = None
+    
     if (opt.parallel):
         device = torch.device(local_rank)
         if (opt.distributed):
