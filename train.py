@@ -502,7 +502,7 @@ if __name__ == '__main__':
 
     # Train
     if not opt.evolve:
-        if (opt.parallel):
+        if (opt.distributed):
             run(train, hyp, opt, None)
         else:
             train(-1, hyp, opt, device) #CPU/Single GPU
