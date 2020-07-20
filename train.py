@@ -7,7 +7,10 @@ import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 import torch.utils.data
 from torch.utils.tensorboard import SummaryWriter
+
+import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.nn import DataParallel as DP
 
 import test  # import test.py to get mAP after each epoch
 from models.yolo import Model
@@ -22,29 +25,7 @@ except:
     print('Apex recommended for faster mixed precision training: https://github.com/NVIDIA/apex')
     mixed_precision = False  # not installed
 
-# Hyperparameters
-hyp = {'optimizer': 'SGD',  # ['adam', 'SGD', None] if none, default is SGD
-       'lr0': 0.01,  # initial learning rate (SGD=1E-2, Adam=1E-3)
-       'momentum': 0.937,  # SGD momentum/Adam beta1
-       'weight_decay': 5e-4,  # optimizer weight decay
-       'giou': 0.05,  # giou loss gain
-       'cls': 0.58,  # cls loss gain
-       'cls_pw': 1.0,  # cls BCELoss positive_weight
-       'obj': 1.0,  # obj loss gain (*=img_size/320 if img_size != 320)
-       'obj_pw': 1.0,  # obj BCELoss positive_weight
-       'iou_t': 0.20,  # iou training threshold
-       'anchor_t': 4.0,  # anchor-multiple threshold
-       'fl_gamma': 0.0,  # focal loss gamma (efficientDet default is gamma=1.5)
-       'hsv_h': 0.014,  # image HSV-Hue augmentation (fraction)
-       'hsv_s': 0.68,  # image HSV-Saturation augmentation (fraction)
-       'hsv_v': 0.36,  # image HSV-Value augmentation (fraction)
-       'degrees': 0.0,  # image rotation (+/- deg)
-       'translate': 0.0,  # image translation (+/- fraction)
-       'scale': 0.5,  # image scale (+/- gain)
-       'shear': 0.0}  # image shear (+/- deg)
-
-
-def train(hyp, tb_writer, opt, device):
+def train(local_rank, hyp, opt, device):
     print(f'Hyperparameters {hyp}')
     log_dir = tb_writer.log_dir if tb_writer else 'runs/evolution'  # run directory
     wdir = str(Path(log_dir) / 'weights') + os.sep  # weights directory
@@ -64,8 +45,19 @@ def train(hyp, tb_writer, opt, device):
     batch_size = opt.batch_size   # batch size per process.
     total_batch_size = opt.total_batch_size
     weights = opt.weights  # initial training weights
-    local_rank = opt.local_rank
-
+    mixed_precision = opt.mixed_precision
+    # local_rank = opt.local_rank
+    if local_rank in [-1, 0]:
+        print('Start Tensorboard with "tensorboard --logdir=runs", view at http://localhost:6006/')
+        tb_writer = SummaryWriter(log_dir=increment_dir('runs/exp', opt.name))
+    else:
+        tb_writer = None
+    if (opt.parallel):
+        device = torch.device(local_rank)
+        if (opt.distributed):
+            torch.cuda.set_device(local_rank)
+            dist.init_process_group(backend='nccl', init_method='tcp://127.0.0.1:9999', rank=local_rank,
+                                    world_size=opt.world_size)  # distributed backend
     # TODO: Init DDP logging. Only the first process is allowed to log.
     # Since I see lots of print here, the logging configuration is skipped here. We may see repeated outputs.
 
@@ -169,10 +161,6 @@ def train(hyp, tb_writer, opt, device):
     # https://discuss.pytorch.org/t/a-problem-occured-when-resuming-an-optimizer/28822
     # plot_lr_scheduler(optimizer, scheduler, epochs)
 
-    # DP mode
-    if device.type != 'cpu' and local_rank == -1 and torch.cuda.device_count() > 1:
-        model = torch.nn.DataParallel(model)
-
     # Exponential moving average
     # From https://github.com/rwightman/pytorch-image-models/blob/master/train.py:
     # "Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper"
@@ -183,8 +171,10 @@ def train(hyp, tb_writer, opt, device):
     ema = torch_utils.ModelEMA(model) if local_rank in [-1, 0] else None
 
     # DDP mode
-    if device.type != 'cpu' and local_rank != -1:
+    if (opt.distributed):
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+    elif (opt.parallel):
+        model = DP(model)
 
     # Trainloader
     dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt, hyp=hyp, augment=True,
@@ -407,6 +397,34 @@ def train(hyp, tb_writer, opt, device):
     torch.cuda.empty_cache()
     return results
 
+def setDefaultHyp():
+    # Hyperparameters
+    hyp = {'optimizer': 'SGD',  # ['adam', 'SGD', None] if none, default is SGD
+        'lr0': 0.01,  # initial learning rate (SGD=1E-2, Adam=1E-3)
+        'momentum': 0.937,  # SGD momentum/Adam beta1
+        'weight_decay': 5e-4,  # optimizer weight decay
+        'giou': 0.05,  # giou loss gain
+        'cls': 0.58,  # cls loss gain
+        'cls_pw': 1.0,  # cls BCELoss positive_weight
+        'obj': 1.0,  # obj loss gain (*=img_size/320 if img_size != 320)
+        'obj_pw': 1.0,  # obj BCELoss positive_weight
+        'iou_t': 0.20,  # iou training threshold
+        'anchor_t': 4.0,  # anchor-multiple threshold
+        'fl_gamma': 0.0,  # focal loss gamma (efficientDet default is gamma=1.5)
+        'hsv_h': 0.014,  # image HSV-Hue augmentation (fraction)
+        'hsv_s': 0.68,  # image HSV-Saturation augmentation (fraction)
+        'hsv_v': 0.36,  # image HSV-Value augmentation (fraction)
+        'degrees': 0.0,  # image rotation (+/- deg)
+        'translate': 0.0,  # image translation (+/- fraction)
+        'scale': 0.5,  # image scale (+/- gain)
+        'shear': 0.0}  # image shear (+/- deg)
+    return hyp
+
+def run(fn, hyp, opt, device):
+    mp.spawn(fn,
+             args=(hyp, opt, device, ),
+             nprocs=opt.world_size,
+             join=True)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -430,19 +448,24 @@ if __name__ == '__main__':
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--multi-scale', action='store_true', help='vary img-size +/- 50%%')
     parser.add_argument('--single-cls', action='store_true', help='train as single-class dataset')
-    parser.add_argument("--sync-bn", action="store_true", help="Use sync-bn, only avaible in DDP mode.")
     # Parameter For DDP.
-    parser.add_argument('--local_rank', type=int, default=-1, help="Extra parameter for DDP implementation. Don't use it manually.")
+    # parser.add_argument('--local_rank', type=int, default=-1, help="Extra parameter for DDP implementation. Don't use it manually.")
+    parser.add_argument("--sync-bn", action="store_true", help="Use sync-bn, only avaible in DDP mode.")
+    parser.add_argument("--distributed", action="store_true", help="Set ddp mode")
     opt = parser.parse_args()
 
     last = get_latest_run() if opt.resume == 'get_last' else opt.resume  # resume from most recent run
     if last and not opt.weights:
         print(f'Resuming training from {last}')
     opt.weights = last if opt.resume and not opt.weights else opt.weights
-    if opt.local_rank in [-1, 0]:
-        check_git_status()
+    # if opt.local_rank in [-1, 0]:
+        # check_git_status()
+    check_git_status()
     opt.cfg = check_file(opt.cfg)  # check file
     opt.data = check_file(opt.data)  # check file
+
+    # Hyperparameters
+    hyp = setDefaultHyp()
     if opt.hyp:  # update hyps
         opt.hyp = check_file(opt.hyp)  # check file
         with open(opt.hyp) as f:
@@ -451,28 +474,37 @@ if __name__ == '__main__':
     device = torch_utils.select_device(opt.device, apex=mixed_precision, batch_size=opt.batch_size)
     opt.total_batch_size = opt.batch_size
     opt.world_size = 1
+    opt.parallel = False
+
+    if (opt.distributed): assert torch.cuda.is_available() and torch.cuda.device_count() > 1, "DDP is not available"
     if device.type == 'cpu':
         mixed_precision = False
-    elif opt.local_rank != -1:
-        # DDP mode
-        assert torch.cuda.device_count() > opt.local_rank
-        torch.cuda.set_device(opt.local_rank)
-        device = torch.device("cuda", opt.local_rank)
-        dist.init_process_group(backend='nccl', init_method='env://')  # distributed backend
+    # elif opt.local_rank != -1:
+    #     # DDP mode
+    #     assert torch.cuda.device_count() > opt.local_rank
+    #     torch.cuda.set_device(opt.local_rank)
+    #     device = torch.device("cuda", opt.local_rank)
+    #     dist.init_process_group(backend='nccl', init_method='env://')  # distributed backend
 
-        opt.world_size = dist.get_world_size()
-        assert opt.batch_size % opt.world_size == 0, "Batch size is not a multiple of the number of devices given!"
-        opt.batch_size = opt.total_batch_size // opt.world_size
+    #     opt.world_size = dist.get_world_size()
+    #     assert opt.batch_size % opt.world_size == 0, "Batch size is not a multiple of the number of devices given!"
+    #     opt.batch_size = opt.total_batch_size // opt.world_size
+    elif torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        opt.parallel = True
+        if (opt.distributed):
+            opt.world_size = torch.cuda.device_count()
+        assert opt.total_batch_size % opt.world_size == 0, "Batch size is not a multiple of the number of devices given!"
+        opt.batch_size //= opt.world_size
+    
+    opt.mixed_precision = mixed_precision
     print(opt)
 
     # Train
     if not opt.evolve:
-        if opt.local_rank in [-1, 0]:
-            print('Start Tensorboard with "tensorboard --logdir=runs", view at http://localhost:6006/')
-            tb_writer = SummaryWriter(log_dir=increment_dir('runs/exp', opt.name))
+        if (opt.parallel):
+            run(train, hyp, opt, None)
         else:
-            tb_writer = None
-        train(hyp, tb_writer, opt, device)
+            train(-1, hyp, opt, device) #CPU/Single GPU
 
     # Evolve hyperparameters (optional)
     else:
