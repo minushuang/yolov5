@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 import torch.utils.data
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
 import torch.multiprocessing as mp
@@ -24,6 +25,7 @@ try:  # Mixed precision training https://github.com/NVIDIA/apex
 except:
     print('Apex recommended for faster mixed precision training: https://github.com/NVIDIA/apex')
     mixed_precision = False  # not installed
+
 
 def train(local_rank, hyp, opt, device):
     print(f'Hyperparameters {hyp}')
@@ -58,11 +60,12 @@ def train(local_rank, hyp, opt, device):
         torch.cuda.set_device(local_rank)
         dist.init_process_group(backend='nccl', init_method='tcp://127.0.0.1:9999', rank=local_rank,
                                 world_size=opt.world_size)  # distributed backend
+        
     # TODO: Init DDP logging. Only the first process is allowed to log.
     # Since I see lots of print here, the logging configuration is skipped here. We may see repeated outputs.
 
     # Configure
-    init_seeds(2+local_rank)
+    init_seeds(2 + local_rank)
     with open(opt.data) as f:
         data_dict = yaml.load(f, Loader=yaml.FullLoader)  # model dict
     train_path = data_dict['train']
@@ -124,7 +127,7 @@ def train(local_rank, hyp, opt, device):
         # load model
         try:
             ckpt['model'] = {k: v for k, v in ckpt['model'].float().state_dict().items()
-                             if model.state_dict()[k].shape == v.shape}  # to FP32, filter
+                             if k in model.state_dict() and model.state_dict()[k].shape == v.shape}
             model.load_state_dict(ckpt['model'], strict=False)
         except KeyError as e:
             s = "%s is not compatible with %s. This may be due to model differences or %s may be out of date. " \
@@ -160,7 +163,6 @@ def train(local_rank, hyp, opt, device):
     scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
     # https://discuss.pytorch.org/t/a-problem-occured-when-resuming-an-optimizer/28822
     # plot_lr_scheduler(optimizer, scheduler, epochs)
-
     # Exponential moving average
     # From https://github.com/rwightman/pytorch-image-models/blob/master/train.py:
     # "Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper"
@@ -175,20 +177,22 @@ def train(local_rank, hyp, opt, device):
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
     elif (opt.parallel):
         model = DP(model)
-
+        
     # Trainloader
     dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt, hyp=hyp, augment=True,
-                                        cache=opt.cache_images, rect=opt.rect, local_rank=local_rank, world_size=opt.world_size)
+                                            cache=opt.cache_images, rect=opt.rect, local_rank=local_rank,
+                                            world_size=opt.world_size)
+    
     mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
     nb = len(dataloader)  # number of batches
-    assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Correct your labels or your model.' % (mlc, nc, opt.cfg)
+    assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Possible class labels are 0-%g' % (mlc, nc, opt.data, nc - 1)
 
     # Testloader
     if local_rank in [-1, 0]:
         # local_rank is set to -1. Because only the first process is expected to do evaluation.
-        testloader = create_dataloader(test_path, imgsz_test, total_batch_size, gs, opt, hyp=hyp, augment=False, 
-                                    cache=opt.cache_images, rect=True, local_rank=-1, world_size=opt.world_size)[0]
-
+        testloader = create_dataloader(test_path, imgsz_test, total_batch_size, gs, opt, hyp=hyp, augment=False,
+                                       cache=opt.cache_images, rect=True, local_rank=-1, world_size=opt.world_size)[0]
+  
     # Model parameters
     hyp['cls'] *= nc / 80.  # scale coco-tuned hyp['cls'] to current dataset
     model.nc = nc  # attach number of classes to model
@@ -233,7 +237,8 @@ def train(local_rank, hyp, opt, device):
             if local_rank in [-1, 0]:
                 w = model.class_weights.cpu().numpy() * (1 - maps) ** 2  # class weights
                 image_weights = labels_to_image_weights(dataset.labels, nc=nc, class_weights=w)
-                dataset.indices = random.choices(range(dataset.n), weights=image_weights, k=dataset.n)  # rand weighted idx
+                dataset.indices = random.choices(range(dataset.n), weights=image_weights,
+                                                 k=dataset.n)  # rand weighted idx
             # Broadcast.
             if local_rank != -1:
                 indices = torch.zeros([dataset.n], dtype=torch.int)
@@ -248,6 +253,7 @@ def train(local_rank, hyp, opt, device):
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
         mloss = torch.zeros(4, device=device)  # mean losses
+
         if opt.distributed:
             dataloader.sampler.set_epoch(epoch)
         pbar = enumerate(dataloader)
@@ -393,7 +399,7 @@ def train(local_rank, hyp, opt, device):
             plot_results()  # save as results.png
         print('%g epochs completed in %.3f hours.\n' % (epoch - start_epoch + 1, (time.time() - t0) / 3600))
 
-    dist.destroy_process_group() if local_rank not in [-1,0] else None
+    dist.destroy_process_group() if opt.distributed else None
     torch.cuda.empty_cache()
     return results
 
@@ -449,7 +455,6 @@ if __name__ == '__main__':
     parser.add_argument('--multi-scale', action='store_true', help='vary img-size +/- 50%%')
     parser.add_argument('--single-cls', action='store_true', help='train as single-class dataset')
     # Parameter For DDP.
-    # parser.add_argument('--local_rank', type=int, default=-1, help="Extra parameter for DDP implementation. Don't use it manually.")
     parser.add_argument("--sync-bn", action="store_true", help="Use sync-bn, only avaible in DDP mode.")
     parser.add_argument("--distributed", action="store_true", help="Set ddp mode")
     opt = parser.parse_args()
@@ -458,8 +463,6 @@ if __name__ == '__main__':
     if last and not opt.weights:
         print(f'Resuming training from {last}')
     opt.weights = last if opt.resume and not opt.weights else opt.weights
-    # if opt.local_rank in [-1, 0]:
-        # check_git_status()
     check_git_status()
     opt.cfg = check_file(opt.cfg)  # check file
     opt.data = check_file(opt.data)  # check file
@@ -479,16 +482,6 @@ if __name__ == '__main__':
     if (opt.distributed): assert torch.cuda.is_available() and torch.cuda.device_count() > 1, "DDP is not available"
     if device.type == 'cpu':
         mixed_precision = False
-    # elif opt.local_rank != -1:
-    #     # DDP mode
-    #     assert torch.cuda.device_count() > opt.local_rank
-    #     torch.cuda.set_device(opt.local_rank)
-    #     device = torch.device("cuda", opt.local_rank)
-    #     dist.init_process_group(backend='nccl', init_method='env://')  # distributed backend
-
-    #     opt.world_size = dist.get_world_size()
-    #     assert opt.batch_size % opt.world_size == 0, "Batch size is not a multiple of the number of devices given!"
-    #     opt.batch_size = opt.total_batch_size // opt.world_size
     elif torch.cuda.is_available() and torch.cuda.device_count() > 1:
         opt.parallel = True
         if (opt.distributed):
